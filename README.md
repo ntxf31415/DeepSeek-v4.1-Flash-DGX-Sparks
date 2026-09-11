@@ -1,4 +1,4 @@
-<h1 align="center">DeepSeek-V4.1-Flash on 3x and 4x NVIDIA DGX Spark</h1>
+<h1 align="center">DeepSeek-V4.1-Flash on 3x and 4x NVIDIA DGX Sparks</h1>
 
 <p align="center">
   <sub>by <a href="https://x.com/MiaAI_lab">Mia'a AI Lab</a></sub>
