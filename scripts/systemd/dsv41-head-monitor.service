@@ -1,0 +1,20 @@
+# dsv41 自愈 monitor 单元（安装: sudo cp 到 /etc/systemd/system/ 后 enable）
+# 对齐 vllm-tp4-head.service 形态: monitor 为主进程, Restart=always 自愈循环
+[Unit]
+Description=dsv41 TP4 head (rank 0) with self-heal
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+User=spark
+ExecStart=/home/spark/dsv41-4x-spark/scripts/dsv41-monitor-head.sh
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=1800
+StartLimitBurst=20
+StandardOutput=append:/home/spark/dsv41-4x-spark/logs-tp4/monitor.log
+StandardError=append:/home/spark/dsv41-4x-spark/logs-tp4/monitor.log
+
+[Install]
+WantedBy=multi-user.target

@@ -17,7 +17,7 @@ while True:
     if gb < thr:
         log.write(f'{time.strftime("%H:%M:%S")} ABORT: MemAvailable {gb:.2f} GB < {thr} GB -> POST /abort_request\n')
         try:
-            req = urllib.request.Request('http://127.0.0.1:8888/abort_request', data=json.dumps({'abort_all': True}).encode(), headers={'Content-Type': 'application/json'})
+            req = urllib.request.Request('http://127.0.0.1:8899/abort_request', data=json.dumps({'abort_all': True}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer YOUR_API_KEY'})
             urllib.request.urlopen(req, timeout=5).read()
             log.write('abort_request sent\n')
         except Exception as e:

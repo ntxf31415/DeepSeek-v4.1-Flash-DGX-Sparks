@@ -138,6 +138,11 @@ SERVE_LOG="${SERVE_LOG:-$LOG_DIR/dsv41.log}"
 REMOTE_PY="$ROOT/scripts/remote.py"
 NFS_VOLUME="${NFS_VOLUME:-dsv41-weights}"
 NFS_SHARE="${NFS_SHARE:-1}"
+# Ring adaptation (ntxf/4dgx dsv41/): local weights on every node — skip the
+# NFS export/mount machinery entirely (WEIGHTS_MODE=local). WORKER_MODEL_DIR
+# must hold a flat checkpoint (config.json + 48 shards) on each worker.
+WEIGHTS_MODE="${WEIGHTS_MODE:-nfs}"
+WORKER_MODEL_DIR="${WORKER_MODEL_DIR:-/home/spark/models/DeepSeek-V4.1-Flash}"
 
 _abs() { readlink -f "$1" 2>/dev/null || echo "$1"; }
 MODEL_DIR="$(_abs "$MODEL_DIR")"
@@ -280,7 +285,7 @@ docker_common_args() {
     -e "SKIP_PREPARE=$SKIP_PREPARE"
     -e "SKIP_VERIFY=$SKIP_VERIFY"
     -e "WARMUP=${WARMUP:-1}"
-    -e "HOST=0.0.0.0"
+    -e "HOST=${HOST:-0.0.0.0}"
     -e "NCCL_NET=$NCCL_NET"
     -e "NCCL_IB_DISABLE=$NCCL_IB_DISABLE"
     -e "NCCL_IB_HCA=$IB_HCA"
@@ -317,6 +322,29 @@ docker_common_args() {
   if [[ -f "$NCCL_HOST_DIR/libnccl.so.2.30.7" || -f "$NCCL_HOST_DIR/libnccl.so.2" ]]; then
     _a+=(-v "$NCCL_HOST_DIR:$NCCL_CONTAINER_DIR:ro" -e "LD_LIBRARY_PATH=$NCCL_CONTAINER_DIR")
   fi
+  # Ring adaptation: host ring-only NCCL + core-pinning shim (same LD_PRELOAD
+  # pair as the vLLM production stack), and the NCCL debug-log取证 mount.
+  if [[ -f /opt/aicad-prod/lib/libncclpin.so && -d /opt/nccl-ringonly ]]; then
+    mkdir -p "$HOME/nccl-debug"
+    _a+=(-v "/opt/aicad-prod/lib/libncclpin.so:/opt/libncclpin.so:ro"
+         -v "/opt/nccl-ringonly:/opt/nccl-ringonly:ro"
+         -v "$HOME/nccl-debug:/nccl-debug:rw"
+         -e 'LD_PRELOAD=/opt/libncclpin.so /opt/nccl-ringonly/libnccl.so.2')
+  fi
+  # Ring adaptation: per-rank PEER_HCA for rank 0 (workers get theirs in
+  # worker_env_lines via PEER_HCA_RANK<n>).
+  if [[ -n "${PEER_HCA_RANK0:-}" ]]; then
+    _a+=(-e "NCCL_IB_PEER_HCA=${PEER_HCA_RANK0}")
+  fi
+  # Ring adaptation: generic passthrough, appended last so it overrides any
+  # default set above (docker keeps the last -e for a duplicated key).
+  if [[ -n "${EXTRA_DOCKER_ENV:-}" ]]; then
+    local _ed
+    for _ed in ${EXTRA_DOCKER_ENV}; do
+      [[ -z "$_ed" ]] && continue
+      _a+=(-e "$_ed")
+    done
+  fi
 }
 
 # Every rank builds its own planner, so the SPS/STS calibration has to exist on
@@ -346,6 +374,23 @@ push_spec_tables() {
 
 worker_env_lines() {
   local wip="$1" wgid="$2" rank="$3"
+  # Ring adaptation: generic env passthrough + per-rank PEER_HCA
+  # (PEER_HCA_RANK<n> from .env). Emitted as single-quoted lines so values
+  # with commas/semicolons survive the remote bash -lc round trip.
+  local _ed _extra=""
+  # LD_PRELOAD must be a literal single-quoted line here: embedding it in a
+  # remote variable (SHIM_VOL) breaks word splitting (quotes are not
+  # re-parsed after variable expansion).
+  _extra+="        -e 'LD_PRELOAD=${LD_PRELOAD_SHIM:-/opt/libncclpin.so /opt/nccl-ringonly/libnccl.so.2}' \\"$'\n'
+  for _ed in ${EXTRA_DOCKER_ENV:-}; do
+    [[ -z "$_ed" ]] && continue
+    _extra+="        -e '$_ed' \\"$'\n'
+  done
+  local _ph_var="PEER_HCA_RANK${rank}"
+  local _ph="${!_ph_var:-}"
+  if [[ -n "$_ph" ]]; then
+    _extra+="        -e 'NCCL_IB_PEER_HCA=$_ph' \\"$'\n'
+  fi
   cat <<EOF
         -e NODE_RANK=$rank -e NNODES=$NNODES \\
         -e TP_SIZE=$TP_SIZE -e EP_SIZE=$EP_SIZE \\
@@ -361,7 +406,7 @@ worker_env_lines() {
         -e DSPARK_STS_TABLE=$DSPARK_STS_TABLE \\
         -e DSV41_SOURCE=/models/DeepSeek-V4.1-Flash \\
         -e MODEL_PATH=/models/DeepSeek-V4.1-Flash -e STATE_PATH=/state \\
-        -e SERVER_PORT=$PORT -e HOST=0.0.0.0 \\
+        -e SERVER_PORT=$PORT -e HOST=${HOST:-0.0.0.0} \\
         -e CONTEXT_LENGTH=$CONTEXT_LENGTH \\
         -e MEM_FRACTION_STATIC=$MEM_FRACTION_STATIC \\
         -e MAX_RUNNING_REQUESTS=$MAX_RUNNING_REQUESTS \\
@@ -390,6 +435,7 @@ worker_env_lines() {
         -e SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE=0 \\
         -e DSV41_TP_PAD=${DSV41_TP_PAD:-1} \\
         -e HOST_IP=$wip -e VLLM_HOST_IP=$wip \\
+${_extra}
 EOF
 }
 
@@ -579,17 +625,27 @@ cmd_serve() {
   fi
 
   local h need_share=0
+  if [[ "$WEIGHTS_MODE" == "local" ]]; then
+    info "WEIGHTS_MODE=local — workers read node-local weights, NFS skipped"
+    for h in "${WORKER_HOSTS[@]}"; do
+      remote_ok_on "$h" "test -f $WORKER_MODEL_DIR/config.json" \
+        || die "missing local weights on $h: $WORKER_MODEL_DIR"
+    done
+  else
+    for h in "${WORKER_HOSTS[@]}"; do
+      if ! nfs_worker_has_model "$h"; then
+        need_share=1
+      fi
+    done
+  fi
   for h in "${WORKER_HOSTS[@]}"; do
-    if ! nfs_worker_has_model "$h"; then
-      need_share=1
-    fi
     if ! remote_ok_on "$h" "docker image inspect $(printf '%q' "$IMAGE") >/dev/null 2>&1"; then
       info "image missing on $h — building"
       cmd_build
       break
     fi
   done
-  if [[ "$need_share" -eq 1 || "$NFS_SHARE" == "1" ]]; then
+  if [[ "$WEIGHTS_MODE" != "local" && ( "$need_share" -eq 1 || "$NFS_SHARE" == "1" ) ]]; then
     cmd_share
   fi
 
@@ -604,13 +660,21 @@ cmd_serve() {
 
   local GID_HEAD gi g
   local -a WORKER_GIDS=()
-  GID_HEAD=$(gid_index_local "$HEAD_IP" 2>/dev/null || true)
-  GID_HEAD="${GID_HEAD:-${NCCL_IB_GID_INDEX:-3}}"
-  for gi in "${!WORKER_IPS[@]}"; do
-    g=$(gid_index_remote "${WORKER_HOSTS[$gi]}" "${WORKER_IPS[$gi]}" | tr -d '\r' || true)
-    WORKER_GIDS+=("${g:-${NCCL_IB_GID_INDEX:-3}}")
-  done
-  info "RoCEv2 GID indexes: head=$GID_HEAD workers=${WORKER_GIDS[*]}"
+  # Ring adaptation: kernel-1031 GID-table reorder makes auto-detection
+  # untrustworthy here; the fleet runs NCCL_IB_GID_INDEX=-1 as a hard rule.
+  if [[ -n "${NCCL_IB_GID_INDEX_FORCE:-}" ]]; then
+    GID_HEAD="$NCCL_IB_GID_INDEX_FORCE"
+    for gi in "${!WORKER_IPS[@]}"; do WORKER_GIDS+=("$NCCL_IB_GID_INDEX_FORCE"); done
+    info "RoCEv2 GID indexes: FORCED head=$GID_HEAD workers=${WORKER_GIDS[*]} (NCCL_IB_GID_INDEX_FORCE)"
+  else
+    GID_HEAD=$(gid_index_local "$HEAD_IP" 2>/dev/null || true)
+    GID_HEAD="${GID_HEAD:-${NCCL_IB_GID_INDEX:-3}}"
+    for gi in "${!WORKER_IPS[@]}"; do
+      g=$(gid_index_remote "${WORKER_HOSTS[$gi]}" "${WORKER_IPS[$gi]}" | tr -d '\r' || true)
+      WORKER_GIDS+=("${g:-${NCCL_IB_GID_INDEX:-3}}")
+    done
+    info "RoCEv2 GID indexes: head=$GID_HEAD workers=${WORKER_GIDS[*]}"
+  fi
 
   docker rm -f "$HEAD_CTN" >/dev/null 2>&1 || true
   for h in "${WORKER_HOSTS[@]}"; do
@@ -626,24 +690,33 @@ cmd_serve() {
     rank=$((idx + 1))
     remote_on "$h" "
       set -e
-      docker volume inspect $NFS_VOLUME >/dev/null || { echo 'MISSING docker volume $NFS_VOLUME on $h — run ./start.sh share'; exit 1; }
+      if [ '$WEIGHTS_MODE' != 'local' ]; then
+        docker volume inspect $NFS_VOLUME >/dev/null || { echo 'MISSING docker volume $NFS_VOLUME on $h — run ./start.sh share'; exit 1; }
+      fi
       test -d /dev/infiniband || { echo 'MISSING /dev/infiniband on $h'; exit 1; }
       mkdir -p $WORKER_DIR/state $WORKER_DIR/logs
       NCCL_VOL=''
       NCCL_ENV=''
-      if [ -f \$HOME/nccl-2.30.7/libnccl.so.2.30.7 ]; then
-        NCCL_VOL=\"-v \$HOME/nccl-2.30.7:$NCCL_CONTAINER_DIR:ro\"
+      if [ -f $NCCL_HOST_DIR/libnccl.so.2.30.7 ] || [ -f $NCCL_HOST_DIR/libnccl.so.2 ]; then
+        NCCL_VOL=\"-v $NCCL_HOST_DIR:$NCCL_CONTAINER_DIR:ro\"
         NCCL_ENV='-e LD_LIBRARY_PATH=$NCCL_CONTAINER_DIR'
       fi
+      SHIM_VOL=''
+      if [ -f /opt/aicad-prod/lib/libncclpin.so ] && [ -d /opt/nccl-ringonly ]; then
+        mkdir -p \$HOME/nccl-debug
+        SHIM_VOL=\"-v /opt/aicad-prod/lib/libncclpin.so:/opt/libncclpin.so:ro -v /opt/nccl-ringonly:/opt/nccl-ringonly:ro -v \$HOME/nccl-debug:/nccl-debug:rw\"
+      fi
+      MODEL_SRC='$NFS_VOLUME'
+      if [ '$WEIGHTS_MODE' = 'local' ]; then MODEL_SRC='$WORKER_MODEL_DIR'; fi
       docker run -d --name $WORKER_CTN \
         --network host --ipc host --privileged --cap-add IPC_LOCK --gpus all \
         --shm-size ${SHM_SIZE:-32g} \
         --ulimit memlock=-1:-1 --ulimit stack=67108864 \
         --device /dev/infiniband:/dev/infiniband \
-        -v $NFS_VOLUME:/models/DeepSeek-V4.1-Flash:ro \
+        -v \$MODEL_SRC:/models/DeepSeek-V4.1-Flash:ro \
         -v $WORKER_DIR/state:/state \
         -v \$HOME/.cache:/root/.cache \
-        \$NCCL_VOL \$NCCL_ENV \\
+        \$NCCL_VOL \$NCCL_ENV \$SHIM_VOL \\
 $(worker_env_lines "$wip" "$wgid" "$rank")
         -e API_KEY=$(printf '%q' "$API_KEY") \\
         -e EXTRA_SGLANG_ARGS=$(printf '%q' "${EXTRA_SGLANG_ARGS:-}") \\

@@ -31,6 +31,12 @@ TP_SIZE = int(os.environ.get('TP_SIZE', os.environ.get('TP', '3')))
 EP_SIZE = int(os.environ.get('EP_SIZE', str(TP_SIZE)))
 DIST_INIT_ADDR = os.environ.get('DIST_INIT_ADDR', '')
 SERVED_MODEL_NAME = os.environ.get('SERVED_MODEL_NAME', 'deepseek-v4.1-flash')
+# Ring adaptation: SERVED_MODEL_NAME may be a comma-separated alias list
+# (e.g. "deepseek-v4.1-flash,deepseek-v4-flash-vision-exp"); requests must use
+# ONE of the names, so the smoke/warm-up payloads use the first entry.
+PRIMARY_MODEL = next(
+    (n.strip() for n in SERVED_MODEL_NAME.split(',') if n.strip()),
+    'deepseek-v4.1-flash')
 
 
 def save(name, value):
@@ -125,7 +131,7 @@ def request(path, payload=None, timeout=10):
 
 def smoke():
     result = request('/v1/chat/completions', dict(
-        model=SERVED_MODEL_NAME, temperature=0,
+        model=PRIMARY_MODEL, temperature=0,
         chat_template_kwargs={'thinking': False},
         messages=[dict(role='user', content='What is 19 + 23? Reply only with the number.')]),
         timeout=300)
@@ -135,7 +141,7 @@ def smoke():
     print('Fresh inference passed: 19 + 23 = 42', flush=True)
     if os.environ.get('SMOKE_QUICK', '0') == '1':
         return
-    common = dict(model=SERVED_MODEL_NAME, temperature=0,
+    common = dict(model=PRIMARY_MODEL, temperature=0,
                   chat_template_kwargs={'thinking': False})
     structured = request('/v1/chat/completions', dict(common,
         messages=[dict(role='user', content='Return an object whose answer is the integer 42.')],
@@ -186,7 +192,7 @@ def warmup():
     if os.environ.get('WARMUP', '1') in ('0', 'off', 'false'):
         return
     started = time.monotonic()
-    common = dict(model=SERVED_MODEL_NAME, temperature=0,
+    common = dict(model=PRIMARY_MODEL, temperature=0,
                   chat_template_kwargs={'thinking': False})
     filler = ('The quick brown fox jumps over the lazy dog near the riverbank '
               'while the sun sets slowly behind the distant hills. ')
@@ -318,9 +324,11 @@ def serve():
         table = os.environ.get('DSPARK_SPS_TABLE', '').strip()
         if table and Path(table).is_file():
             args += ['--speculative-dspark-sps-table-path', table]
-            # Fills each step's verify window up to the cuda-graph tier the
-            # forward is padded to anyway: free verification at the same cost.
-            args += ['--speculative-dspark-align-verify-tokens-to-graph-tier']
+            # Ring adaptation: graph-tier alignment tripped the engram
+            # target-verify assert on a batch of 8 short requests at 1M ctx
+            # (2026-09-12 Boot B). Opt-in via DSV41_ALIGN_VERIFY=1.
+            if os.environ.get('DSV41_ALIGN_VERIFY', '0') == '1':
+                args += ['--speculative-dspark-align-verify-tokens-to-graph-tier']
         elif table:
             print(f'DSPARK_SPS_TABLE={table} not found; '
                   'staying on the verify-all schedule', flush=True)
