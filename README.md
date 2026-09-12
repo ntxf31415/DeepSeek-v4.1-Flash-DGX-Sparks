@@ -7,7 +7,7 @@ across **4× NVIDIA DGX Spark (GB10)** connected as a **switchless RoCE ring** (
 
 > 中文说明：[README.zh-CN.md](README.zh-CN.md) · 部署方案与基准对比：[docs/](docs/)
 
-**Measured on 4× DGX Spark (GB10, sm_121a, switchless ring), 1M ctx / 4M KV pool:**
+**Measured on 4× DGX Spark (GB10, sm_121a, switchless ring), 1M ctx / 5M KV pool:**
 
 | benchmark | value |
 |---|---|

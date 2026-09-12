@@ -4,7 +4,7 @@
 **deepseek-ai/DeepSeek-V4.1-Flash**（552B MoE、8B/16B 激活、MXFP4 experts、
 1M 上下文、DSpark 投机解码）的生产方案。
 
-**四机环网实测（1M ctx / 4M KV 池）：**
+**四机环网实测（1M ctx / 5M KV 池）：**
 
 | 指标 | 数值 |
 |---|---|
