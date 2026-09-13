@@ -46,6 +46,7 @@ suite. **No weights, no images, no NCCL binaries.**
 |---|---|---|
 | SGLang serving recipe (boot, adapters, Engram row store, DSpark setup) | [MiaAI-Lab/DeepSeek-v4.1-Flash-DGX-Sparks](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-DGX-Sparks) | AGPL-3.0-or-later |
 | Recipe lineage / benchmark methodology | [0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000](https://github.com/0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000) | MIT |
+| Host ring-only NCCL 2.30.7 build + `libncclpin` core-pinning shim (host-side, not shipped) | [luxingcom/aicad-nccl-optimization](https://github.com/luxingcom/aicad-nccl-optimization) (LuZ lineage) | **no license declared** |
 | Model weights | `deepseek-ai/DeepSeek-V4.1-Flash` (Hugging Face) | see model card |
 
 ## Ring adaptation delta (vs upstream TP4 profile)
@@ -54,7 +55,9 @@ suite. **No weights, no images, no NCCL binaries.**
 
 - Ring-only NCCL 2.30.7 + libncclpin core-pinning shim via `LD_PRELOAD`;
   `NCCL_IB_GID_INDEX=-1` iron rule; per-rank `PEER_HCA` for the 4-edge wiring
-  (`./start-tp4.sh ncclcheck` verifies the ring-only path came up)
+  (`./start-tp4.sh ncclcheck` verifies the ring-only path came up). The library is
+  the **LuZ lineage** build (ring-only via NCCL's algorithm matrix, `Tree=0 / Ring=1`),
+  *not* a SparkRing patched library — see [BUILD-IDENTITY.md](BUILD-IDENTITY.md)
 - Node-local weights (no NFS), loopback engine behind a concurrency proxy,
   multi-alias served names (old served name kept for zero-touch consumers)
 

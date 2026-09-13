@@ -40,13 +40,14 @@
 |---|---|---|
 | SGLang 配方（boot、适配器、Engram 行存储、DSpark 设置） | [MiaAI-Lab/DeepSeek-v4.1-Flash-DGX-Sparks](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-DGX-Sparks) | AGPL-3.0-or-later |
 | 配方谱系 / 基准方法 | [0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000](https://github.com/0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000) | MIT |
+| 宿主 ring-only NCCL 2.30.7 构建 + `libncclpin` 核绑定 shim（宿主侧，仓库不含） | [luxingcom/aicad-nccl-optimization](https://github.com/luxingcom/aicad-nccl-optimization)（LuZ 谱系） | **未声明许可证** |
 | 模型权重 | `deepseek-ai/DeepSeek-V4.1-Flash`（Hugging Face） | 见模型卡 |
 
 ## 环网适配差异（相对上游 TP4 profile）
 
 **传输 / 拓扑**
 
-- ring-only NCCL 2.30.7 + libncclpin 核绑定 shim（`LD_PRELOAD`）；`NCCL_IB_GID_INDEX=-1` 铁律；四边接线的 per-rank `PEER_HCA`（`./start-tp4.sh ncclcheck` 可自检 ring-only 是否真的生效）
+- ring-only NCCL 2.30.7 + libncclpin 核绑定 shim（`LD_PRELOAD`）；`NCCL_IB_GID_INDEX=-1` 铁律；四边接线的 per-rank `PEER_HCA`（`./start-tp4.sh ncclcheck` 可自检 ring-only 是否真的生效）。该库是 **LuZ 谱系**构建（靠 NCCL 算法矩阵 `Tree=0 / Ring=1` 实现 ring-only），**不是** SparkRing 的补丁库——见 [BUILD-IDENTITY.md](BUILD-IDENTITY.md)
 - 节点本地权重（无 NFS）、loopback 引擎 + 并发代理、多别名 served name（旧名保留，消费端零改动）
 
 **为环网做的调优**（每项单独 A/B，`[measured]` 数据见配置示例头部注释）
