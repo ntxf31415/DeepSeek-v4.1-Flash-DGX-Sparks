@@ -30,7 +30,7 @@ docker run --rm --entrypoint sh dsv41-4x-spark:local -c \
   'md5sum /opt/dsv41/boot.py /opt/dsv41/adapter/librow_store.so \
           /sgl-workspace/sglang/python/sglang/kernels/ops/attention/flash_mla_sm120.py'
 # reference fleet:
-#   83fedad1aa13d95ae2c4d147926a8449  /opt/dsv41/boot.py
+#   74025c52d5011316a5fad6a32243c279  /opt/dsv41/boot.py
 #   1f820aef687d0f9685c0e4b51585ece6  /opt/dsv41/adapter/librow_store.so
 #   d91b0cda319e8a9b57e73e71020fb7bb  .../attention/flash_mla_sm120.py
 ```
