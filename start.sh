@@ -24,6 +24,7 @@
 #   ./start.sh logs [N]        tail head boot logs
 #   ./start.sh logs worker<N> [lines]   (worker1, worker2, ...)
 #   ./start.sh smoke           arithmetic (+ optional tools/vision)
+#   ./start.sh ncclcheck       verify NCCL came up ring-only (patch + algo matrix)
 #
 set -euo pipefail
 
@@ -138,7 +139,7 @@ SERVE_LOG="${SERVE_LOG:-$LOG_DIR/dsv41.log}"
 REMOTE_PY="$ROOT/scripts/remote.py"
 NFS_VOLUME="${NFS_VOLUME:-dsv41-weights}"
 NFS_SHARE="${NFS_SHARE:-1}"
-# Ring adaptation (ntxf/4dgx dsv41/): local weights on every node — skip the
+# Ring adaptation (内部镜像仓（internal mirror） dsv41/): local weights on every node — skip the
 # NFS export/mount machinery entirely (WEIGHTS_MODE=local). WORKER_MODEL_DIR
 # must hold a flat checkpoint (config.json + 48 shards) on each worker.
 WEIGHTS_MODE="${WEIGHTS_MODE:-nfs}"
@@ -805,6 +806,10 @@ $(worker_env_lines "$wip" "$wgid" "$rank")
       ( setsid docker logs -f --since 1s "$HEAD_CTN" >>"$SERVE_LOG" 2>&1 </dev/null & ) 2>/dev/null
       echo
       info "API is up on :$PORT (smoke + warm-up passed) — engine keeps running, this script is done."
+      # Ring adaptation: verify NCCL came up ring-only (RING-ONLY patch present,
+      # Tree disabled in the algorithm matrix, expected RoCE devices in use).
+      # Non-fatal: a report is printed, the engine keeps running either way.
+      "$ROOT/scripts/nccl_selfcheck.sh" || warn "NCCL 自检未通过 — 见上（./start.sh ncclcheck 可重跑）"
       cmd_status
       echo
       echo "  curl http://$HEAD_IP:$PORT/v1/chat/completions \\"
@@ -952,6 +957,7 @@ case "$CMD" in
   status) cmd_status ;;
   logs) cmd_logs "$@" ;;
   smoke) cmd_smoke ;;
+  ncclcheck) "$ROOT/scripts/nccl_selfcheck.sh" "$@" ;;
   -h|--help|help) usage ;;
   *) die "unknown command: $CMD (try ./start.sh help)" ;;
 esac
