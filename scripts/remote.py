@@ -131,11 +131,14 @@ def ssh_cmd(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--env-file", default="")
-    ap.add_argument("--host", default=os.environ.get("WORKER_HOST", "10.0.0.2"))
-    ap.add_argument("--user", default=os.environ.get("WORKER_USER") or os.environ.get("USER", "spark"))
+    # Ring adaptation: defaults must be resolved AFTER load_dotenv, otherwise a
+    # value that only exists in the .env file is invisible here (upstream PR #5).
+    # Callers that pass these explicitly are unaffected either way.
+    ap.add_argument("--host", default=None)
+    ap.add_argument("--user", default=None)
     ap.add_argument(
         "--identity",
-        default=os.environ.get("SSH_IDENTITY", "~/.ssh/id_ed25519_shared"),
+        default=None,
     )
     # Seconds of idle with no output before abort. 0 = wait forever.
     # Default 600: short commands finish fast; docker pull needs a high value
@@ -143,20 +146,25 @@ def main() -> int:
     ap.add_argument(
         "--timeout",
         type=int,
-        default=int(os.environ.get("REMOTE_TIMEOUT", "600")),
+        default=None,
     )
     ap.add_argument("remote")
     args = ap.parse_args()
     if args.env_file:
         load_dotenv(args.env_file)
+    # Resolve after load_dotenv so values that live only in the .env file apply.
+    host = args.host or os.environ.get("WORKER_HOST", "10.0.0.2")
+    user = args.user or os.environ.get("WORKER_USER") or os.environ.get("USER", "spark")
+    identity = args.identity or os.environ.get("SSH_IDENTITY", "~/.ssh/id_ed25519_shared")
+    timeout = args.timeout if args.timeout is not None else int(os.environ.get("REMOTE_TIMEOUT", "600"))
     password = os.environ.get("WORKER_PASS") or None
     return ssh_cmd(
-        args.host,
-        args.user,
+        host,
+        user,
         args.remote,
         password,
-        args.identity,
-        args.timeout,
+        identity,
+        timeout,
     )
 
 

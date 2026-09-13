@@ -73,6 +73,28 @@ fi
 gdr=$(grep -oE 'cuMemGdrSupport [0-9]+' "$log" | head -1 || true)
 echo "[i] ${gdr:-cuMemGdrSupport 未知}（GB10 预期 0 = 无 GDR，CPU-path）"
 
+# 6. 补丁谱系识别（仅记录）：区分两套已知的 switchless 补丁路线
+#    - SparkRing/PR#3：源码加 NCCL_PARAM(SwitchlessRingOnly,…)，运行期打印
+#      "Tree/PAT transport setup disabled by NCCL_SWITCHLESS_RING_ONLY"
+#    - LuZ 路线（本栈）：环邻过滤 + 算法矩阵 Tree=0（Tree 仍建连但永不被选中）
+lib="${NCCL_HOST_DIR:-/opt/nccl-ringonly}/libnccl.so.2.30.7"
+if [[ -f "$lib" ]]; then
+  # grep -c prints "0" and exits 1 on no match, so do not append another 0.
+  sw=$(strings "$lib" 2>/dev/null | grep -c SWITCHLESS_RING_ONLY)
+  sk=$(strings "$lib" 2>/dev/null | grep -c SKIP_TREE_CONNECT)
+  dis=$(grep -icE 'transport setup disabled' "$log")
+  sw=${sw:-0}; sk=${sk:-0}; dis=${dis:-0}
+  if [[ "$sw" -gt 0 ]]; then
+    echo "[i] NCCL 补丁谱系: SparkRing/PR#3 路线（SWITCHLESS_RING_ONLY>0, skip-tree=${sk}）"
+  elif [[ "$dis" -eq 0 ]]; then
+    echo "[i] NCCL 补丁谱系: LuZ 路线（无 SWITCHLESS_RING_ONLY；靠算法矩阵 Tree=0 达成 ring-only）"
+  else
+    echo "[i] NCCL 补丁谱系: 未知/混合"
+  fi
+else
+  echo "[i] 未找到 $lib，跳过谱系识别"
+fi
+
 echo
 if [[ "$fail" -eq 0 ]]; then
   echo "[+] NCCL 自检通过"

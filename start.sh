@@ -25,6 +25,7 @@
 #   ./start.sh logs worker<N> [lines]   (worker1, worker2, ...)
 #   ./start.sh smoke           arithmetic (+ optional tools/vision)
 #   ./start.sh ncclcheck       verify NCCL came up ring-only (patch + algo matrix)
+#   ./start.sh gate [--full]   is the engine *trustworthy*, not merely Up
 #
 set -euo pipefail
 
@@ -139,7 +140,7 @@ SERVE_LOG="${SERVE_LOG:-$LOG_DIR/dsv41.log}"
 REMOTE_PY="$ROOT/scripts/remote.py"
 NFS_VOLUME="${NFS_VOLUME:-dsv41-weights}"
 NFS_SHARE="${NFS_SHARE:-1}"
-# Ring adaptation (内部镜像仓（internal mirror） dsv41/): local weights on every node — skip the
+# Ring adaptation (internal mirror dsv41/): local weights on every node — skip the
 # NFS export/mount machinery entirely (WEIGHTS_MODE=local). WORKER_MODEL_DIR
 # must hold a flat checkpoint (config.json + 48 shards) on each worker.
 WEIGHTS_MODE="${WEIGHTS_MODE:-nfs}"
@@ -898,6 +899,13 @@ cmd_smoke() {
   echo
 }
 
+# Ring adaptation: one command that answers "may this engine be trusted?",
+# not merely "is the container Up" (alexellis's gate discipline).
+cmd_gate() {
+  SERVER_PORT="$PORT" API_KEY_FILE="$STATE_DIR/api-key" \
+    "$ROOT/scripts/gate.sh" "$@"
+}
+
 usage() {
   sed -n '2,24p' "$0" | tr -d '#'
 }
@@ -958,6 +966,7 @@ case "$CMD" in
   logs) cmd_logs "$@" ;;
   smoke) cmd_smoke ;;
   ncclcheck) "$ROOT/scripts/nccl_selfcheck.sh" "$@" ;;
+  gate) cmd_gate "$@" ;;
   -h|--help|help) usage ;;
   *) die "unknown command: $CMD (try ./start.sh help)" ;;
 esac
