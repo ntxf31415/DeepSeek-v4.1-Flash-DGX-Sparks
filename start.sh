@@ -193,13 +193,19 @@ ensure_ssh_keys() {
 }
 
 model_src() {
+  local src
   if [[ -L "$COMMON_MODEL" ]]; then
-    readlink -f "$COMMON_MODEL"
+    src="$(readlink -f "$COMMON_MODEL")"
   elif [[ -d "$COMMON_MODEL" ]]; then
-    echo "$COMMON_MODEL"
+    src="$COMMON_MODEL"
   else
-    echo "$MODEL_DIR"
+    src="$MODEL_DIR"
   fi
+  # Ring adaptation: never silently return a path with no checkpoint. A missing
+  # dir here made `pack` mount an empty tree, write zero shards and still
+  # report success (workers stayed on the 2-read unpacked Engram path).
+  [[ -f "$src/config.json" ]] || die "no checkpoint at $src (config.json missing) — set MODEL_DIR"
+  echo "$src"
 }
 
 api_key() {
@@ -908,11 +914,21 @@ cmd_pack() {
     --entrypoint python3 "$IMAGE" \
     /opt/dsv41/scripts/pack_engram.py --rank 0 --tp "$TP_SIZE" --out /engram \
     || die "pack failed on head"
-  local idx=1 host
+  local idx=1 host wsrc
   for host in "${WORKER_IPS[@]}"; do
     info "packing rank $idx on $host..."
-    remote_on "$host" "mkdir -p $WORKER_ENGRAM_DIR && docker run --rm --network host \
-      -v $NFS_VOLUME:/models/DeepSeek-V4.1-Flash:ro \
+    # Ring adaptation: in local-weights mode the worker's checkpoint lives at
+    # WORKER_MODEL_DIR; the NFS volume only exists in nfs mode. Without this the
+    # mount silently resolves to a non-existent path and pack writes nothing,
+    # leaving the worker on the 2-read unpacked path.
+    if [[ "$WEIGHTS_MODE" == "local" ]]; then
+      wsrc="$WORKER_MODEL_DIR"
+    else
+      wsrc="$NFS_VOLUME"
+    fi
+    remote_on "$host" "test -f $wsrc/config.json || { echo 'MISSING checkpoint on $host: $wsrc'; exit 1; }
+      mkdir -p $WORKER_ENGRAM_DIR && docker run --rm --network host \
+      -v $wsrc:/models/DeepSeek-V4.1-Flash:ro \
       -v $WORKER_ENGRAM_DIR:/engram \
       -e DSV41_SOURCE=/models/DeepSeek-V4.1-Flash \
       --entrypoint python3 $IMAGE \
