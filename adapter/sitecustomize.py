@@ -37,6 +37,11 @@ class EngramLoader(importlib.abc.Loader):
             # so the KV-cache metric and server-info report zero bytes.
             from kv_pool_metrics import install
             install(module)
+        elif module.__name__ == 'sglang.srt.managers.scheduler':
+            # Sizes each prefill chunk from the prefix length. Inert unless
+            # DSV41_ADAPTIVE_CHUNK=1.
+            from adaptive_chunk import install
+            install(module)
         else:
             # V4.1 ratio-1/2 indexers always call the FP4 DeepGEMM kernel.
             # SM120 needs its split-128 planner even when the legacy FP8
@@ -59,6 +64,7 @@ class EngramFinder(importlib.abc.MetaPathFinder):
                             'sglang.srt.model_executor.model_runner',
                             'sglang.srt.mem_cache.unified_memory_pool',
                             'sglang.srt.mem_cache.multi_ended_allocator',
+                            'sglang.srt.managers.scheduler',
                             'sglang.srt.layers.attention.dsv4.metadata'):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
