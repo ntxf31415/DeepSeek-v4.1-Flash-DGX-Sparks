@@ -31,6 +31,12 @@ class EngramLoader(importlib.abc.Loader):
         elif module.__name__ == 'sglang.srt.model_executor.model_runner':
             from prefill_empty_cache import install
             install(module)
+        elif module.__name__ in ('sglang.srt.mem_cache.unified_memory_pool',
+                                 'sglang.srt.mem_cache.multi_ended_allocator'):
+            # These pools ship `mem_usage = 0.0` (upstream #37935 not in our pin),
+            # so the KV-cache metric and server-info report zero bytes.
+            from kv_pool_metrics import install
+            install(module)
         else:
             # V4.1 ratio-1/2 indexers always call the FP4 DeepGEMM kernel.
             # SM120 needs its split-128 planner even when the legacy FP8
@@ -51,6 +57,8 @@ class EngramFinder(importlib.abc.MetaPathFinder):
                             'sglang.srt.layers.quantization.fp8_utils',
                             'sglang.srt.layers.quantization.fp8',
                             'sglang.srt.model_executor.model_runner',
+                            'sglang.srt.mem_cache.unified_memory_pool',
+                            'sglang.srt.mem_cache.multi_ended_allocator',
                             'sglang.srt.layers.attention.dsv4.metadata'):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
