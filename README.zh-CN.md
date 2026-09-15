@@ -4,17 +4,19 @@
 **deepseek-ai/DeepSeek-V4.1-Flash**（552B MoE、8B/16B 激活、MXFP4 experts、
 1M 上下文、DSpark 投机解码）的生产方案。
 
-**四机环网实测（1M ctx / 8M KV 池）。思考模式写作 `OFF · ON`；数字对应的构建见 [BUILD-IDENTITY.md](BUILD-IDENTITY.md)。**
+**四机环网实测（1M ctx / 8M KV 池）。数字对应的构建见 [BUILD-IDENTITY.md](BUILD-IDENTITY.md)。**
 
 | 指标 | 数值 |
 |---|---|
-| decode 峰/均（code，temp 0） | **100.3 / 81.4** · 99.8 / 81.2 tok/s |
-| 散文 OFF · ON | **33.3 · 36.6** tok/s |
-| prefill 8K / 32K / 100K | **3102 / 3443 / 3253** t/s |
-| 聚合 c1 / c4 / c8 / c12 | 82 / 223 / 295 / **398** tok/s（ON：83 / 225 / 298 / 403） |
+| **散文 decode，单流**（sparkDash 口径） | **48** tok/s · TTFT 约 185 ms |
+| **聚合 c1 / c2 / c4 / c6 / c8 / c12**（同口径） | **48 / 71 / 119 / 148 / 163 / 220** tok/s |
+| decode 峰/均（code，temp 0） | 100.3 / 81.4 · 99.8 / 81.2 tok/s |
+| prefill 8K / 32K / 100K | 3102 / 3443 / 3253 t/s |
 | 质量门禁 | needle 30K-470K ✅ · corruption 0/0/0 · 终止性 18/18+18/18 · code-gate 12/12 · GSM8K n=50 **1.00** |
 | DSpark 接受 | 3.98 tok/step，rate 0.595（数学流打满 6.0） |
 | 冷启动 | 约 9 分钟，无冷启动惩罚 |
+
+散文与聚合两行用 [sparkDash](https://github.com/MiaAI-Lab/sparkDash) 的 `DecodeBench` 口径（上游机队公开数字用的就是它）：固定散文 prompt、流式、`min_tokens = max_tokens = 256` 且 `ignore_eos`，decode = `(completion_tokens − 1) / (t_last − t_first content chunk)`——**是 TTFT 之后的窗口，prefill 与排队不进分母**。thinking off。同一 prompt 用墙钟口径量会低约 **30%**，**两套口径不可相减**，引用时必须带口径。`decode 峰/均` 与 `prefill` 两行是别的量法，未按新口径重测。
 
 **长上下文**（冷 prefill，needle 校验）：
 

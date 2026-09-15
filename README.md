@@ -8,18 +8,26 @@ across **4× NVIDIA DGX Spark (GB10)** connected as a **switchless RoCE ring** (
 > 中文说明：[README.zh-CN.md](README.zh-CN.md) · 部署方案与基准对比：[docs/](docs/)
 
 **Measured on 4× DGX Spark (GB10, sm_121a, switchless ring), 1M ctx / 8M KV pool.**
-Thinking mode is given as `OFF · ON`; the build these numbers came from is pinned in
-[BUILD-IDENTITY.md](BUILD-IDENTITY.md).
+The build these numbers came from is pinned in [BUILD-IDENTITY.md](BUILD-IDENTITY.md).
 
 | benchmark | value |
 |---|---|
-| decode peak / mean (code, temp 0) | **100.3 / 81.4** · 99.8 / 81.2 tok/s |
-| prose OFF · ON | **33.3 · 36.6** tok/s |
-| prefill 8K / 32K / 100K | **3102 / 3443 / 3253** t/s |
-| aggregate c1 / c4 / c8 / c12 | 82 / 223 / 295 / **398** tok/s (ON: 83 / 225 / 298 / 403) |
+| **prose decode, 1 stream** (sparkDash protocol) | **48** tok/s · TTFT ~185 ms |
+| **aggregate c1 / c2 / c4 / c6 / c8 / c12** (same protocol) | **48 / 71 / 119 / 148 / 163 / 220** tok/s |
+| decode peak / mean (code, temp 0) | 100.3 / 81.4 · 99.8 / 81.2 tok/s |
+| prefill 8K / 32K / 100K | 3102 / 3443 / 3253 t/s |
 | quality gates | needle 30K-470K ✅ · corruption 0/0/0 · termination 18/18+18/18 · code-gate 12/12 · GSM8K n=50 **1.00** |
 | DSpark acceptance | 3.98 tok/step, rate 0.595 (6.0 saturated on math) |
 | cold start | ~9 min, **no cold-start penalty** |
+
+The prose and aggregate rows use the [sparkDash](https://github.com/MiaAI-Lab/sparkDash)
+`DecodeBench` protocol — the one the upstream fleet publishes. One fixed prose prompt,
+streaming, `min_tokens = max_tokens = 256` with `ignore_eos`, decode measured as
+`(completion_tokens − 1) / (t_last − t_first content chunk)`: post-TTFT, so prefill and
+queueing stay out of the denominator. Thinking off. The same prompt timed by wall clock
+reads ~30 % lower — **the two bases are not comparable**, so quote the protocol with the
+number. The `decode peak / mean` and `prefill` rows use different measurements and were
+not re-baselined.
 
 **Long context** (cold prefill, needle-checked):
 
