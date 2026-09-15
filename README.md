@@ -26,8 +26,13 @@ streaming, `min_tokens = max_tokens = 256` with `ignore_eos`, decode measured as
 `(completion_tokens − 1) / (t_last − t_first content chunk)`: post-TTFT, so prefill and
 queueing stay out of the denominator. Thinking off. The same prompt timed by wall clock
 reads ~30 % lower — **the two bases are not comparable**, so quote the protocol with the
-number. The `decode peak / mean` and `prefill` rows use different measurements and were
-not re-baselined.
+number.
+
+`decode peak / mean` is the *ordinary-output* row: single stream over the code and mixed
+prompts in [`bench/bench_tp.py`](bench/bench_tp.py), timed by **wall clock**, so its
+denominator still carries the prefill. That is the basis this table used before
+sparkDash; it is kept for continuity and has **not** been re-baselined. `prefill` is a
+separate measurement.
 
 **Long context** (cold prefill, needle-checked):
 
