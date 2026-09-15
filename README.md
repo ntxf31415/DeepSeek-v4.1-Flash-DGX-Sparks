@@ -7,7 +7,7 @@ across **4× NVIDIA DGX Spark (GB10)** connected as a **switchless RoCE ring** (
 
 > 中文说明：[README.zh-CN.md](README.zh-CN.md) · 部署方案与基准对比：[docs/](docs/)
 
-**Measured on 4× DGX Spark (GB10, sm_121a, switchless ring), 1M ctx / 5M KV pool.**
+**Measured on 4× DGX Spark (GB10, sm_121a, switchless ring), 1M ctx / 8M KV pool.**
 Thinking mode is given as `OFF · ON`; the build these numbers came from is pinned in
 [BUILD-IDENTITY.md](BUILD-IDENTITY.md).
 
@@ -27,7 +27,11 @@ Thinking mode is given as `OFF · ON`; the build these numbers came from is pinn
 |---|---|
 | 470K | ✅ 211.7 s · 2144 t/s |
 | 600K | ✅ 341.7 s · MemAvailable floor 4.92 GB |
-| **900K** | ⚠️ **fails** — the Engram row cache and the shared-expert pad buffer cost ~2 GB of deep-context headroom. 600K and below are unaffected. |
+| **900K** | ✅ **completes with adaptive chunking** (2367 s, MemAvailable floor 1.96 GB). A fixed 2048 chunk wedges the engine here: the indexer's per-chunk transient is ~14 B × chunk × prefix, ~26 GB at a 900K prefix. See the adaptive-chunk adapter below. |
+
+Long-prefill *speed* is the trade for that headroom: 600K costs 1.08× the fixed-2048
+time and 900K costs 3.4×. Prefixes below the adaptive low-water mark keep the full
+static chunk, so ordinary traffic is unaffected.
 
 Full six-stack comparison incl. LuZ / Vision-Exp / GLM: [docs/4DGX-dsv41-基准测试-横向对比-20260912.md](docs/4DGX-dsv41-基准测试-横向对比-20260912.md).
 
@@ -70,6 +74,8 @@ suite. **No weights, no images, no NCCL binaries.**
 | `DSV41_CACHE_GIB=1` / 16-way | Engram row cache: hit rate 0 → 99.1 %, c12 +6 %, prefill 100K +10.5 % |
 | `DSV41_SHARED_PAD_K=1` | upstream PR #17: keeps the shared expert's K=576 shape eligible for b12x (bit-identical) |
 | static verify mode | upstream compact/ragged mode trips an engram target-verify assertion on V4.1 (sgl-project/sglang#39173) |
+| `MEM_FRACTION_STATIC=0.85` + `MAX_TOTAL_TOKENS=8M` (was 0.90 / 5M) | the KV pool was not the binding limit — the prefill transient is. 0.85 frees ~16 GB outside the static pool for it, which pays for both the larger pool and the long-prefill peak |
+| adaptive chunking (`DSV41_ADAPTIVE_CHUNK=1`, LOW 400K / HIGH 800K / FLOOR 1024) | sizes each prefill chunk from the prefix length, so the transient stays bounded without paying the small-chunk step penalty on short prompts. Reuses the `dynamic_chunk_sizer` hook SGLang already has (it only installs under `pp_size > 1`) |
 
 Tried and reverted: `--enable-deepseek-v4-fp4-indexer` costs ~11 % on 500K cold
 prefill and 6.4 GB of unified memory for no c12 gain. Single regression kept:
@@ -78,7 +84,8 @@ c6 260 → 236 (an EP2 side effect; c8/c12 rise far more).
 ## Repo contents
 
 - `start.sh / start-tp4.sh / stop.sh / boot.py` — serving orchestration, pinned checkpoint boot, smoke + warm-up
-- `adapter/` — SGLang patches (Engram row store C++, MXFP8 backend, shared-expert K pad, prefill cache hook)
+- `adapter/` — SGLang patches (Engram row store C++, MXFP8 backend, shared-expert K pad, prefill cache hook, prefix-sized chunking, KV-pool byte accounting)
+- `runtime/` — build-time patches applied over the base image (`patch_encoding_dsv41.py` tolerates the image placeholder token in message text, which upstream rejects with a self-sustaining HTTP 500 on the Anthropic endpoint)
 - `scripts/` — SSH helper, verify/ probe kit, self-heal monitor + systemd unit, `gate.sh`, `nccl_selfcheck.sh`
 - `bench/` — gate suite (needle / corruption / termination / code-gate), vision gate, event-timeline matrix + common-window analysis, prose, GSM8K spot, third-party-shaped sweep
 - `.env.tp4.ring.example` — the configuration this repo actually runs (sanitized, with the measured rationale for each deviation)

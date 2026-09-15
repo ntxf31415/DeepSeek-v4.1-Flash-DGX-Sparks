@@ -4,7 +4,7 @@
 **deepseek-ai/DeepSeek-V4.1-Flash**（552B MoE、8B/16B 激活、MXFP4 experts、
 1M 上下文、DSpark 投机解码）的生产方案。
 
-**四机环网实测（1M ctx / 5M KV 池）。思考模式写作 `OFF · ON`；数字对应的构建见 [BUILD-IDENTITY.md](BUILD-IDENTITY.md)。**
+**四机环网实测（1M ctx / 8M KV 池）。思考模式写作 `OFF · ON`；数字对应的构建见 [BUILD-IDENTITY.md](BUILD-IDENTITY.md)。**
 
 | 指标 | 数值 |
 |---|---|
@@ -22,7 +22,9 @@
 |---|---|
 | 470K | ✅ 211.7s · 2144 t/s |
 | 600K | ✅ 341.7s · 内存地板 4.92 GB |
-| **900K** | ⚠️ **失败**——Engram 行缓存与共享专家 pad 缓冲吃掉约 2GB 深上下文余量；600K 及以下不受影响 |
+| **900K** | ✅ **自适应 chunk 下可跑通**（2367s，内存地板 1.96 GB）。固定 2048 chunk 在此会 wedge——indexer 每 chunk 瞬时约 `14 B × chunk × prefix`，900K prefix 下约 26 GB。见下方自适应 chunk 适配器。 |
+
+长档**速度**是换取该余量的代价：600K 为固定 2048 的 1.08×、900K 为 3.4×。prefix 低于自适应低水位时仍走完整静态 chunk，**日常流量不受影响**。
 
 六方案横向总表（LuZ / Vision-Exp / GLM 对照）：[docs/4DGX-dsv41-基准测试-横向对比-20260912.md](docs/4DGX-dsv41-基准测试-横向对比-20260912.md)。
 
@@ -59,13 +61,16 @@
 | `DSV41_CACHE_GIB=1` / 16-way | Engram 行缓存：命中率 0 → 99.1%，c12 +6%，prefill 100K +10.5% |
 | `DSV41_SHARED_PAD_K=1` | 上游 PR#17：让共享专家 K=576 的形状重回 b12x（逐位无损） |
 | static verify | 上游 compact/ragged 模式在 V4.1 上触发 engram target-verify 断言（sgl-project/sglang#39173） |
+| `MEM_FRACTION_STATIC=0.85` + `MAX_TOTAL_TOKENS=8M`（原 0.90 / 5M） | KV 池不是瓶颈，**prefill 瞬时才是**。0.85 让出约 16 GB 到静态池外，同时买下更大的池与长 prefill 峰值 |
+| 自适应 chunk（`DSV41_ADAPTIVE_CHUNK=1`，LOW 400K / HIGH 800K / FLOOR 1024） | 按 prefix 长度决定每 chunk 大小，瞬时因此有界，而短 prompt 不必付小 chunk 的步数代价。复用 SGLang 已有的 `dynamic_chunk_sizer` 钩子（默认只在 `pp_size > 1` 时装） |
 
 试后回退：`--enable-deepseek-v4-fp4-indexer`（500K 长档 −11%、多吃 6.4GB 统一内存，c12 无增益）。唯一保留的回退项：c6 260 → 236（EP2 的副作用，但 c8/c12 涨幅远大于此）。
 
 ## 仓库内容
 
 - `start.sh / start-tp4.sh / stop.sh / boot.py` — 编排、锁修订版下载、冒烟 + 预热
-- `adapter/` — SGLang 补丁（Engram 行存储 C++、MXFP8 后端、共享专家 K padding、prefill 缓存钩子）
+- `adapter/` — SGLang 补丁（Engram 行存储 C++、MXFP8 后端、共享专家 K padding、prefill 缓存钩子、按 prefix 定 chunk、KV 池字节记账）
+- `runtime/` — 构建期补丁（`patch_encoding_dsv41.py`：容忍文本里的 image 占位 token——上游会抛 500 且自我持续）
 - `scripts/` — SSH 助手、verify/ 探针集、自愈监控 + systemd 单元、`gate.sh`、`nccl_selfcheck.sh`
 - `bench/` — 门禁套件、vision 门禁、事件矩阵 + 重叠窗分析、散文、GSM8K、第三方形状并发扫描
 - `.env.tp4.ring.example` — **本仓库实际运行的配置**（脱敏，每处偏离上游都带实测理由）
