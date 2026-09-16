@@ -19,11 +19,37 @@ class EngramLoader(importlib.abc.Loader):
         elif module.__name__ == 'sglang.srt.layers.quantization.fp8_utils':
             from mxfp8_b12x import install
             install(module)
+            # AFTER b12x, so this wraps its wrapper rather than the original.
+            # Gated on DSV41_SHARED_PAD_K, inactive by default.
+            from shared_pad_k import install as install_shared_pad
+            install_shared_pad(module)
         elif module.__name__ == 'sglang.srt.layers.quantization.fp8':
             from mxfp8_b12x import install_fp8
             install_fp8(module)
+            from shared_pad_k import install_fp8 as install_shared_pad_fp8
+            install_shared_pad_fp8(module)
         elif module.__name__ == 'sglang.srt.model_executor.model_runner':
             from prefill_empty_cache import install
+            install(module)
+        elif module.__name__ in ('sglang.srt.mem_cache.unified_memory_pool',
+                            'sglang.srt.mem_cache.deepseek_v4_memory_pool',
+                                 'sglang.srt.mem_cache.multi_ended_allocator'):
+            # These pools ship `mem_usage = 0.0` (upstream #37935 not in our pin),
+            # so the KV-cache metric and server-info report zero bytes.
+            from kv_pool_metrics import install
+            install(module)
+        elif module.__name__ == 'sglang.srt.managers.scheduler':
+            # Sizes each prefill chunk from the prefix length. Inert unless
+            # DSV41_ADAPTIVE_CHUNK=1.
+            from adaptive_chunk import install
+            install(module)
+            # Diagnostic for the KV-cache metric. Inert unless DSV41_KV_METRIC_DIAG=1.
+            from kv_pool_metrics import install_scheduler_diag
+            install_scheduler_diag(module)
+        elif module.__name__ == 'sglang.srt.layers.attention.deepseek_v4_backend':
+            # Caps the torch top-k indexer's transient score buffer. Inert
+            # unless DSV41_INDEXER_BUDGET_MIB is set.
+            from indexer_budget import install
             install(module)
         else:
             # V4.1 ratio-1/2 indexers always call the FP4 DeepGEMM kernel.
@@ -45,6 +71,11 @@ class EngramFinder(importlib.abc.MetaPathFinder):
                             'sglang.srt.layers.quantization.fp8_utils',
                             'sglang.srt.layers.quantization.fp8',
                             'sglang.srt.model_executor.model_runner',
+                            'sglang.srt.mem_cache.unified_memory_pool',
+                            'sglang.srt.mem_cache.multi_ended_allocator',
+                            'sglang.srt.mem_cache.deepseek_v4_memory_pool',
+                            'sglang.srt.managers.scheduler',
+                            'sglang.srt.layers.attention.deepseek_v4_backend',
                             'sglang.srt.layers.attention.dsv4.metadata'):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)

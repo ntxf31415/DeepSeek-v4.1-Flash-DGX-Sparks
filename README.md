@@ -92,11 +92,13 @@ for the ~40 GB per rank that TP4 leaves free (~77 GiB of weights per rank instea
 
 | TP4 setting | Value | Why |
 |---|---|---|
-| `CONTEXT_LENGTH` | 1,048,576 | model maximum; fits with ~10 GB of slack per rank |
-| `MAX_TOTAL_TOKENS` | 4,000,000 | 6.7 GB of KV per rank |
-| `MAX_RUNNING_REQUESTS` | 8 | CUDA graphs for batch 1-8 |
-| `CHUNKED_PREFILL_SIZE` | 4096 | indexer logits 4.3 GB per chunk at 1M context |
-| `MEM_FRACTION_STATIC` | 0.90 | keeps runtime slack for long prefills |
+| `CONTEXT_LENGTH` | 1,048,576 | model maximum |
+| `MAX_TOTAL_TOKENS` | 8,000,000 | KV pool. Not the binding constraint: at 1M context the transient prefill buffer is, not KV |
+| `MAX_RUNNING_REQUESTS` | 12 | |
+| `CHUNKED_PREFILL_SIZE` | 2048 | base size only; adaptive sizing overrides it per prefix (below) |
+| `MEM_FRACTION_STATIC` | 0.85 | 0.80 buys no memory and costs ~30% prefill time; 0.90 wedges at 900k |
+| `DSV41_ADAPTIVE_CHUNK` | 1 | `adapter/adaptive_chunk.py`: size each chunk from the prefix length (LOW 409600 / HIGH 819200 / FLOOR 1024) instead of a fixed 2048/4096 |
+| `DSV41_INDEXER_BUDGET_MIB` | 256 | `adapter/indexer_budget.py`: cap the torch top-k indexer's transient score buffer. Upstream ships 1 GiB |
 | `DSV41_TP_PAD` | 0 | heads, o_groups, draft experts and vocab all divide by 4: no padded shards |
 
 ```bash
@@ -113,8 +115,8 @@ What changes against the 3-node profile:
 | resident weights per rank | ~101 GiB | ~77 GiB |
 | free memory per rank while serving | ~6 GB | ~40 GB |
 | attention shards | heads padded 64→96, groups 8→12; rank 2 is all padding | exact: 16 heads, 2 groups per rank, no wasted GEMMs |
-| KV pool / context | 750k tokens / 256k limit, ~32k usable (memory-bound on the head) | 4M tokens / 1M (model maximum) |
-| concurrency | 4 | 8 |
+| KV pool / context | 750k tokens / 256k limit, ~32k usable (memory-bound on the head) | 8M tokens / 1M (model maximum) |
+| concurrency | 4 | 12 |
 | NCCL per step | 104 collectives across 3 nodes | 104 collectives across 4 nodes (one more ring hop each) |
 
 Fabric: a Spark has two ConnectX-7 ports, so three nodes form a full triangle but four
@@ -133,11 +135,41 @@ legacy `WORKER1_IP`/`WORKER2_IP` pairs still work), so 5+ nodes only need a matc
 `TP_SIZE` and `NNODES`. Nothing in the image is TP-specific; the padded-shard repair simply
 finds nothing to repair at TP4.
 
-Every measurement in this README comes from the 3-node fleet; the TP4 profile has been
-validated for configuration and script paths only (`./start-tp4.sh doctor`), not booted.
-Expect the same per-step structure (dense GEMMs, MoE, NCCL) with smaller attention GEMMs
-per rank and one extra network hop per collective; the memory headroom is what makes the
-long context and the higher concurrency safe, not a faster step.
+The TP4 numbers in this README are measured, not projected: the profile is booted and
+serving. They come from a 4×GB10 fleet in a single boot. Treat them as "this
+configuration works and here is roughly what it does", not as a benchmark — the same
+configuration has varied by up to ~20% between boots (see *Long-context* below).
+
+| measured at TP4 | Value |
+|---|---|
+| decode, one stream, 256-token prose, TTFT excluded | 47.8 t/s (median of 9; spread 46.2-48.2) |
+| prefill, 8k / 32k / 100k prompt | 2965 / 3779 / 3939 tok/s |
+| aggregate decode at concurrency 1 / 2 / 4 / 8 | 64.3 / 96.2 / 151.5 / 211.0 t/s |
+| TTFT at those levels | 188 / 304 / 388 / 333 ms |
+| 600k-token needle (distinct content, no radix hit) | PASS, 438 s |
+| 900k-token needle (941,949 tokens) | PASS, 1013 s |
+| lowest host `MemAvailable` during those two | 3.97 GB (the guard trips at 1.5 GB; it never did) |
+| idle `MemAvailable` per node | ~12.6 GB on the head, ~13.3 GB on a worker |
+
+At TP4, long context is bounded by the **transient prefill buffer, not the KV pool**.
+Each chunk allocates indexer logits proportional to the prefix so far, and at 1M
+context that buffer — not the 8M-token KV pin — is what runs the box out of memory.
+Two levers act on it and both are in the settings table above: adaptive chunk sizing,
+and `DSV41_INDEXER_BUDGET_MIB`. On this fleet the budget alone moved the 900k memory
+floor from 2.27 GB to 3.97 GB with the greedy output byte-identical and no measurable
+throughput change; adaptive sizing is what lets a 900k prompt complete at all — a fixed
+2048 chunk wedges at that length, and a fixed 1024 is safe but 3× slower.
+
+The honest caveat: the same configuration measured 846 s and 1013 s for the 900k
+needle on two different boots. A single-boot A/B smaller than ~20% here is not
+evidence. Compare arms within one boot, or repeat both.
+
+A greedy fingerprint is the cheapest guard against a false win here. Several DSV4 /
+SM12x changes alter the tokens produced rather than only their speed (upstream
+sglang#39235), so hash the completions of a fixed prompt set before comparing
+throughput. `scripts/verify/fingerprint.py` does this; it is what rejected the
+FlashMLA `triton` backend on this fleet, which measured −48% decode, −73% prefill
+*and* a different fingerprint.
 
 ## What is in the box
 
@@ -299,6 +331,23 @@ fails), and the head has little RAM to spare.
   by `start.sh`) turns on compact ragged verify, which mainly pays at concurrency ≥2.
 - Fewer, fused small kernels (~2000 per step) and the 13-16 ms of cross-node latency are the
   remaining floor at TP=3.
+- **The indexer score budget is a patch, not a knob.** `DSV41_INDEXER_BUDGET_MIB` works by
+  rewriting a module constant at import (`adapter/indexer_budget.py`); upstream exposes no
+  way to set it. Same for the adaptive chunk sizing. Both would be better as real options.
+- **KV tiering is unbuilt here, not unavailable.** SGLang ships HiCache (L1 GPU / L2 host /
+  L3 external, with a node-local `file` backend and `--radix-eviction-policy`), and this
+  fleet is a natural fit for it: a comparable deployment reports 87-92% of prompt tokens
+  hitting the GPU prefix cache, which is exactly the population that would benefit from a
+  disk tier when it gets evicted. Worth measuring before building.
+- **NVFP4 KV: ruled out, on evidence.** No graph-compatible, quality-validated
+  implementation for SM121 is public; the cases that exist run `page-size 1` with a Triton
+  backend, which is not a graph path. FP8 KV is also constrained on this part — FMHAv2 has
+  no FP8 prefill kernel on SM120/SM121 (upstream sglang#39807), so `trtllm_mha` + FP8 KV is
+  rejected at construction.
+- **FlashMLA backends are not interchangeable.** The SM120 sparse MLA decode path defaults
+  to FlashInfer CUTLASS; `SGLANG_SM120_FLASHMLA_BACKEND=triton` selects this repo's Triton
+  fallback instead. On this fleet the Triton path cost −48% decode and −73% prefill and moved
+  the greedy fingerprint, so the default is the one to keep.
 
 ## Attribution
 
