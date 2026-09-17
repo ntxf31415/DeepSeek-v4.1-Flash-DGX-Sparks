@@ -95,10 +95,11 @@ for the ~40 GB per rank that TP4 leaves free (~77 GiB of weights per rank instea
 | `CONTEXT_LENGTH` | 1,048,576 | model maximum |
 | `MAX_TOTAL_TOKENS` | 8,000,000 | KV pool. Not the binding constraint: at 1M context the transient prefill buffer is, not KV |
 | `MAX_RUNNING_REQUESTS` | 12 | |
-| `CHUNKED_PREFILL_SIZE` | 2048 | base size only; adaptive sizing overrides it per prefix (below) |
+| `CHUNKED_PREFILL_SIZE` | 4096 | static; the indexer transient no longer scales with the prefix (below) |
 | `MEM_FRACTION_STATIC` | 0.85 | 0.80 buys no memory and costs ~30% prefill time; 0.90 wedges at 900k |
-| `DSV41_ADAPTIVE_CHUNK` | 1 | `adapter/adaptive_chunk.py`: size each chunk from the prefix length (LOW 409600 / HIGH 819200 / FLOOR 1024) instead of a fixed 2048/4096 |
-| `DSV41_INDEXER_BUDGET_MIB` | 256 | `adapter/indexer_budget.py`: cap the torch top-k indexer's transient score buffer. Upstream ships 1 GiB |
+| `DSV41_INDEXER_CHUNKED` | 1 | `adapter/indexer_chunked.py`, a backport of upstream sglang#39187: score the dense indexer in row chunks of a fixed logits budget, so the peak stops depending on the prefix |
+| `DSV41_ADAPTIVE_CHUNK` | 0 | `adapter/adaptive_chunk.py`, the earlier fix: shrink the chunk as the prefix grows. Kept as the fallback arm — more headroom, ~20% slower at 900k |
+| `DSV41_INDEXER_BUDGET_MIB` | 256 | `adapter/indexer_budget.py`: caps the candidate-block copy. Inert while `DSV41_INDEXER_CHUNKED=1`, which replaces the method that reads it |
 | `DSV41_TP_PAD` | 0 | heads, o_groups, draft experts and vocab all divide by 4: no padded shards |
 
 ```bash
@@ -154,15 +155,30 @@ configuration has varied by up to ~20% between boots (see *Long-context* below).
 At TP4, long context is bounded by the **transient prefill buffer, not the KV pool**.
 Each chunk allocates indexer logits proportional to the prefix so far, and at 1M
 context that buffer — not the 8M-token KV pin — is what runs the box out of memory.
-Two levers act on it and both are in the settings table above: adaptive chunk sizing,
-and `DSV41_INDEXER_BUDGET_MIB`. On this fleet the budget alone moved the 900k memory
-floor from 2.27 GB to 3.97 GB with the greedy output byte-identical and no measurable
-throughput change; adaptive sizing is what lets a 900k prompt complete at all — a fixed
-2048 chunk wedges at that length, and a fixed 1024 is safe but 3× slower.
+The fix is not to shrink the chunk but to bound that buffer.
+`adapter/indexer_chunked.py` is a backport of upstream sglang#39187: it scores the
+dense indexer in row chunks of a fixed logits budget, so the peak stops depending on
+the prefix and a **static** chunk is safe at any context. Measured on this fleet, one
+boot per arm, greedy fingerprint byte-identical throughout and the correctness gate
+passing on each:
 
-The honest caveat: the same configuration measured 846 s and 1013 s for the 900k
-needle on two different boots. A single-boot A/B smaller than ~20% here is not
-evidence. Compare arms within one boot, or repeat both.
+|  | 600k needle | 900k needle | memory floor at 900k |
+|---|---|---|---|
+| adaptive chunk (2048 base, shrinking as the prefix grows) | 438 s | 1013 s | 3.97 GB |
+| + `indexer_chunked` | 341 s | 711 s | **6.24 GB** |
+| + `indexer_chunked`, static 4096 | **327 s** | **571 s** | 5.26 GB |
+
+The shipped configuration is the last row: 44% faster at 900k than shrinking the
+chunk, with one fewer moving part. It gives up headroom (5.26 vs 6.24 GB — still
+3.5x the 1.5 GB guard) and is slightly slower on short prompts (~8k: 2715 vs 2957
+tok/s), so `adapter/adaptive_chunk.py` stays in the tree and `DSV41_ADAPTIVE_CHUNK=1`
+restores that arm if a workload later pushes context longer or memory tighter.
+
+The honest caveat. Boot-to-boot variance on this box reaches ~20%: the adaptive
+configuration alone measured 846 s and 1013 s for the same 900k needle on two
+different boots. A single-boot A/B smaller than that is not evidence — compare arms
+within one boot, or repeat both. The three rows above are one boot each; the ordering
+was the same at 600k and 900k, which is why it is reported at all.
 
 A greedy fingerprint is the cheapest guard against a false win here. Several DSV4 /
 SM12x changes alter the tokens produced rather than only their speed (upstream
