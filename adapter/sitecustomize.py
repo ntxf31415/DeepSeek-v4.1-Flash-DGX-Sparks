@@ -51,6 +51,13 @@ class EngramLoader(importlib.abc.Loader):
             # unless DSV41_INDEXER_BUDGET_MIB is set.
             from indexer_budget import install
             install(module)
+            # Bounds the whole prefill indexer transient instead of just the
+            # candidate copy, by scoring in row chunks. Inert unless
+            # DSV41_INDEXER_CHUNKED=1. When it is on it replaces the method, so
+            # it no longer reads the constant set just above -- that is why the
+            # two are separate switches rather than one ladder.
+            from indexer_chunked import install as install_indexer_chunked
+            install_indexer_chunked(module)
         else:
             # V4.1 ratio-1/2 indexers always call the FP4 DeepGEMM kernel.
             # SM120 needs its split-128 planner even when the legacy FP8
